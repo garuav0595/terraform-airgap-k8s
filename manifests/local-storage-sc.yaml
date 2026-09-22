@@ -1,0 +1,17 @@
+# Static manifest (no templating needed) applied by scripts/60-addons.sh.
+#
+# no-provisioner: there is no CSI driver bundled here -- PVs backed by
+# this class are hand-created (e.g. via a DaemonSet that provisions
+# host paths) or left to an operator. WaitForFirstConsumer delays
+# binding until a Pod actually needs the volume, so the scheduler
+# picks a PV on the SAME node the Pod lands on rather than binding
+# blind. Retain, not Delete: on bare metal there is no backing store
+# to reclaim -- deleting the PV object must never imply deleting data
+# an operator has to explicitly clean up.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-storage
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
