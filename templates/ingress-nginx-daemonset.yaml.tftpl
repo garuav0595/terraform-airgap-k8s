@@ -1,0 +1,310 @@
+# Rendered once (main.tf phase 7) and applied by scripts/60-addons.sh.
+#
+# hostNetwork DaemonSet pinned to the control-plane nodes, per the
+# build spec's add-on defaults -- not a "Deployment behind a
+# ClusterIP/NodePort Service" like the stock ingress-nginx manifests
+# ship, because:
+#   - there is no registry and no cloud LB to hand a Service type
+#     LoadBalancer to,
+#   - the control-plane nodes are the only ones guaranteed to exist
+#     in a workers-optional topology,
+#   - hostNetwork means the listening ports ARE the "NodePorts"
+#     30408/32521 -- no extra Service indirection needed.
+# The control-plane taint is deliberately KEPT (per the spec) -- this
+# DaemonSet just tolerates it explicitly rather than removing
+# protection from the masters for every other workload.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ingress-nginx
+  namespace: ingress-nginx
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ingress-nginx
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "endpoints", "nodes", "pods", "secrets", "namespaces", "services"]
+    verbs: ["list", "watch", "get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingressclasses", "ingresses"]
+    verbs: ["list", "watch", "get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["list", "watch", "get", "create", "update"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list", "watch", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ingress-nginx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ingress-nginx
+subjects:
+  - kind: ServiceAccount
+    name: ingress-nginx
+    namespace: ingress-nginx
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+data:
+  allow-snippet-annotations: "false"
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: nginx
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "true"
+spec:
+  controller: k8s.io/ingress-nginx
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-nginx
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ingress-nginx
+    spec:
+      serviceAccountName: ingress-nginx
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Pinned to control-plane, taint kept and explicitly tolerated
+      # (build spec add-on defaults).
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: controller
+          image: registry.k8s.io/ingress-nginx/controller:${ingress_nginx_version}
+          # Air-gapped: every image was preloaded into containerd's
+          # k8s.io namespace (requirement #4). If this ever pulls,
+          # something was missed in prepare-bundle.sh.
+          imagePullPolicy: IfNotPresent
+          args:
+            - /nginx-ingress-controller
+            - --publish-status-address=127.0.0.1
+            - --election-id=ingress-nginx-leader
+            - --controller-class=k8s.io/ingress-nginx
+            - --ingress-class=nginx
+            - --configmap=$(POD_NAMESPACE)/ingress-nginx-controller
+            - --http-port=${ingress_http_nodeport}
+            - --https-port=${ingress_https_nodeport}
+          securityContext:
+            allowPrivilegeEscalation: true
+            capabilities:
+              add: ["NET_BIND_SERVICE"]
+              drop: ["ALL"]
+            runAsUser: 101
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          ports:
+            - name: http
+              containerPort: ${ingress_http_nodeport}
+              protocol: TCP
+            - name: https
+              containerPort: ${ingress_https_nodeport}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 10254
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 10254
+            periodSeconds: 5
+---
+# --- Admission webhook: validates Ingress objects before they're
+# persisted (e.g. catches two Ingresses claiming the same host+path).
+# Mirrors upstream ingress-nginx's certgen/patch Jobs, using the
+# pinned kube-webhook-certgen image (also preloaded offline).
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx-controller-admission
+  namespace: ingress-nginx
+spec:
+  selector:
+    app.kubernetes.io/name: ingress-nginx
+  ports:
+    - name: https-webhook
+      port: 443
+      targetPort: 8443
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ingress-nginx-admission
+  namespace: ingress-nginx
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ingress-nginx-admission
+  namespace: ingress-nginx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ingress-nginx-admission
+subjects:
+  - kind: ServiceAccount
+    name: ingress-nginx-admission
+    namespace: ingress-nginx
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ingress-nginx-admission
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ingress-nginx-admission
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ingress-nginx-admission
+subjects:
+  - kind: ServiceAccount
+    name: ingress-nginx-admission
+    namespace: ingress-nginx
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ingress-nginx-admission
+  namespace: ingress-nginx
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ingress-nginx-admission-create
+  namespace: ingress-nginx
+spec:
+  template:
+    spec:
+      serviceAccountName: ingress-nginx-admission
+      # Same control-plane pinning as the controller -- these Jobs
+      # must schedule even on a workers-optional cluster.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: create
+          image: registry.k8s.io/ingress-nginx/kube-webhook-certgen:${ingress_nginx_certgen_version}
+          imagePullPolicy: IfNotPresent
+          args:
+            - create
+            - --host=ingress-nginx-controller-admission,ingress-nginx-controller-admission.ingress-nginx.svc
+            - --namespace=$(POD_NAMESPACE)
+            - --secret-name=ingress-nginx-admission
+          env:
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+      restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ingress-nginx-admission-patch
+  namespace: ingress-nginx
+spec:
+  template:
+    spec:
+      serviceAccountName: ingress-nginx-admission
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: patch
+          image: registry.k8s.io/ingress-nginx/kube-webhook-certgen:${ingress_nginx_certgen_version}
+          imagePullPolicy: IfNotPresent
+          args:
+            - patch
+            - --webhook-name=ingress-nginx-admission
+            - --namespace=$(POD_NAMESPACE)
+            - --patch-mutating=false
+            - --secret-name=ingress-nginx-admission
+            - --patch-failure-policy=Ignore
+          env:
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+      restartPolicy: OnFailure
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: ingress-nginx-admission
+webhooks:
+  - name: validate.nginx.ingress.kubernetes.io
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingresses"]
+  # failurePolicy Ignore, deliberately: on an air-gapped cluster the
+  # webhook Pod itself can be momentarily unschedulable (node
+  # rebuild, control-plane maintenance) and we never want that to
+  # block ALL ingress changes cluster-wide.
+  failurePolicy: Ignore
+  sideEffects: None
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    service:
+      namespace: ingress-nginx
+      name: ingress-nginx-controller-admission
+      path: /networking/v1/ingresses

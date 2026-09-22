@@ -1,0 +1,45 @@
+# Rendered once per VIP-fronting node (main.tf phase 4).
+#
+# TCP mode, not HTTP mode: kube-apiserver terminates its own TLS and
+# haproxy has no business (and no certificate) to do so itself here.
+# A plain TCP proxy with a tcp-check is enough to detect a dead
+# apiserver and stop routing to it.
+global
+    log 127.0.0.1 local0
+    maxconn 20000
+    daemon
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    retries 3
+    timeout connect 5s
+    timeout client  1h
+    timeout server  1h
+
+# client -> VIP:${api_vip_port} -> master:${apiserver_bind_port}
+# (requirement #1, the two-port rule -- see variables.tf).
+frontend kube_apiserver_frontend
+    bind *:${api_vip_port}
+    mode tcp
+    default_backend kube_apiserver_backend
+
+backend kube_apiserver_backend
+    mode tcp
+    balance roundrobin
+    option tcp-check
+%{ for m in masters ~}
+    server ${m.name} ${m.ip}:${apiserver_bind_port} check inter 3s fall 3 rise 2
+%{ endfor ~}
+
+# Local stats socket only (127.0.0.1), so check_apiserver.sh /
+# keepalived's track_script can query it without opening anything
+# on the network.
+listen stats
+    bind 127.0.0.1:9000
+    mode http
+    stats enable
+    stats uri /haproxy?stats
+    stats refresh 10s

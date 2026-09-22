@@ -1,0 +1,74 @@
+# Rendered by main.tf (phase 5) and uploaded to the first master.
+# Multi-document kubeadm config: InitConfiguration, ClusterConfiguration,
+# KubeletConfiguration, KubeProxyConfiguration.
+#
+# certificateKey (for --upload-certs) is NOT set here -- v1beta3
+# InitConfiguration has no YAML field for it, so it's passed as a CLI
+# flag by scripts/40-init-first-master.sh, generated once in Terraform
+# (random_id.certificate_key) same as the join token below.
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+nodeRegistration:
+  name: "${node_name}"
+  criSocket: unix:///var/run/containerd/containerd.sock
+  kubeletExtraArgs:
+    node-ip: "${advertise_ip}"
+bootstrapTokens:
+  - token: "${token}"
+    # Never expires: this bundle may be re-used weeks later to add a
+    # node with zero internet available to mint a fresh token (see
+    # README "adding a node later"). Acceptable here because the
+    # token only lives inside an already-air-gapped network segment.
+    ttl: "0s"
+    usages:
+      - signing
+      - authentication
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: "v${kubernetes_version}"
+# client -> VIP:api_vip_port (haproxy) -> master:apiserver_bind_port
+# (kube-apiserver). See the two-port rule, requirement #1.
+controlPlaneEndpoint: "${api_vip}:${api_vip_port}"
+networking:
+  podSubnet: "${pod_subnet}"
+  serviceSubnet: "${service_subnet}"
+  dnsDomain: "${dns_domain}"
+apiServer:
+  extraArgs:
+    secure-port: "${apiserver_bind_port}"
+  certSANs:
+%{ for san in cert_sans ~}
+    - "${san}"
+%{ endfor ~}
+controllerManager:
+  extraArgs: {}
+scheduler:
+  extraArgs: {}
+etcd:
+  local:
+    imageTag: "${etcd_version}"
+# imageRepository is deliberately left at the kubeadm default
+# (registry.k8s.io). We are NOT running a local registry -- every
+# image was preloaded straight into containerd's k8s.io namespace
+# under that exact repo/tag (see bundle/prepare-bundle.sh and
+# scripts/20-load-images.sh), so kubeadm asking for
+# registry.k8s.io/kube-apiserver:vX resolves from the local
+# containerd content store and, with imagePullPolicy IfNotPresent,
+# never touches the network.
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+# THE single most important air-gap setting (requirement #4): with
+# no registry, a garbage-collected image is unrecoverable. Setting
+# both thresholds this high means the kubelet effectively never
+# evicts images for disk pressure. Disk pressure should instead be
+# solved by giving nodes enough disk for the bundle, not by letting
+# the kubelet quietly delete images nothing can re-pull.
+imageGCHighThresholdPercent: 100
+imageGCLowThresholdPercent: 99
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+mode: "${kube_proxy_mode}"

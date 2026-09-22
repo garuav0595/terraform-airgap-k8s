@@ -1,0 +1,59 @@
+# Rendered once per VIP-fronting node (main.tf phase 4).
+#
+# INTERFACE_PLACEHOLDER is substituted by scripts/30-proxy-setup.sh
+# at apply time -- NIC names ("ens192", "enp1s0", "eth0"...) are not
+# knowable from Terraform, which never logs into the box before this
+# point (requirement #8).
+global_defs {
+    router_id ${node_name}
+    vrrp_skip_check_adv_addr
+    script_user root
+    enable_script_security
+}
+
+vrrp_script chk_apiserver {
+    script "/opt/k8s-airgap/check_apiserver.sh"
+    interval 3
+    weight -20
+    fall 2
+    rise 2
+}
+
+vrrp_instance VI_1 {
+    state ${state}
+    interface INTERFACE_PLACEHOLDER
+    virtual_router_id 51
+    priority ${priority}
+    advert_int 1
+
+    # nopreempt: once a BACKUP takes the VIP after the MASTER dies,
+    # it keeps it even after the original MASTER comes back healthy.
+    # Without this, the VIP bounces back and forth on every restart
+    # of the higher-priority node, which is far more disruptive to
+    # client connections than just staying put.
+    nopreempt
+
+    # Unicast, not multicast (requirement #7): 224.0.0.18 VRRP
+    # advertisements are routinely dropped by enterprise switch
+    # fabrics across VLAN boundaries. Unicast peer list sidesteps
+    # that entirely -- it's just UDP between known IPs.
+    unicast_src_ip ${unicast_src_ip}
+    unicast_peer {
+%{ for peer in unicast_peers ~}
+        ${peer}
+%{ endfor ~}
+    }
+
+    authentication {
+        auth_type PASS
+        auth_pass ${auth_pass}
+    }
+
+    track_script {
+        chk_apiserver
+    }
+
+    virtual_ipaddress {
+        ${api_vip}
+    }
+}

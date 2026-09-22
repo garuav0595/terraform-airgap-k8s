@@ -1,0 +1,17 @@
+#!/bin/bash
+# Rendered once per VIP-fronting node and installed at
+# /opt/k8s-airgap/check_apiserver.sh (main.tf phase 4 / 30-proxy-setup.sh).
+#
+# Used as a keepalived vrrp_script (requirement #7): checked every 3s
+# with weight -20. If THIS node's local haproxy frontend stops
+# answering, this exits non-zero, keepalived drops this node's VRRP
+# priority by 20, and (being lower than a healthy backup's priority)
+# the VIP fails over. `/healthz` on kube-apiserver is exempt from
+# authorization by default, so this needs no credentials.
+set -euo pipefail
+
+if curl --silent --insecure --max-time 2 --output /dev/null "https://127.0.0.1:${api_vip_port}/healthz"; then
+    exit 0
+fi
+
+exit 1

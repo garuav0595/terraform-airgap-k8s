@@ -1,0 +1,32 @@
+# Rendered per joining node (main.tf phases 6a/6b).
+#
+# Discovery uses the bootstrap token + CA cert hash generated/fetched
+# in Terraform (requirement #10) -- no `kubeadm token create` or
+# output-scraping needed at join time. The CA hash is PUBLIC (it is
+# the same hash published in the kube-public/cluster-info ConfigMap
+# any anonymous client can already read), so surfacing it via the
+# `external` data source does not leak a secret off the node.
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: "${api_vip}:${api_vip_port}"
+    token: "${token}"
+    caCertHashes:
+      - "sha256:${ca_cert_hash}"
+nodeRegistration:
+  name: "${node_name}"
+  criSocket: unix:///var/run/containerd/containerd.sock
+  kubeletExtraArgs:
+    node-ip: "${advertise_ip}"
+%{ if is_control_plane ~}
+# Only present for additional control-plane nodes. This node's own
+# 50-join.sh invocation is gated on wait-cp-ready.sh first --
+# requirement #2: two nodes joining --control-plane concurrently
+# race on the etcd member list.
+controlPlane:
+  localAPIEndpoint:
+    advertiseAddress: "${advertise_ip}"
+    bindPort: ${apiserver_bind_port}
+  certificateKey: "${certificate_key}"
+%{ endif ~}
