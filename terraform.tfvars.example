@@ -1,0 +1,72 @@
+# terraform.tfvars.example
+#
+# Reference topology: 3 masters (VIP colocated), 3 workers, no
+# dedicated proxy nodes, no egress proxy.
+#
+# Copy this to terraform.tfvars and edit -- Terraform does NOT
+# auto-load a file named *.tfvars.example (only exact "terraform.tfvars"
+# or "*.auto.tfvars"), which is deliberate: the interlock in
+# variables.tf is supposed to force a conscious `-var-file` or
+# terraform.tfvars edit, never an accidental default apply.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#   $EDITOR terraform.tfvars
+#   terraform init
+#   terraform plan
+#   terraform apply
+
+# The safety interlock (requirement #12). Leave commented out until
+# you have actually reviewed the plan below against real node IPs --
+# terraform plan will fail loudly with the full target list until you
+# set this.
+# confirm_bootstrap = "yes-bootstrap-new-cluster"
+
+ssh_user              = "sarvadmin"
+ssh_private_key_path  = "~/.ssh/id_rsa_k8s_airgap"
+
+masters = [
+  { name = "k8s-master-1", ip = "10.20.30.11" },
+  { name = "k8s-master-2", ip = "10.20.30.12" },
+  { name = "k8s-master-3", ip = "10.20.30.13" },
+]
+
+workers = [
+  { name = "k8s-worker-1", ip = "10.20.30.21" },
+  { name = "k8s-worker-2", ip = "10.20.30.22" },
+  { name = "k8s-worker-3", ip = "10.20.30.23" },
+]
+
+# Leave empty to colocate haproxy+keepalived on the masters above.
+proxy_nodes = []
+
+manage_vip           = true
+api_vip               = "10.20.30.10"   # MUST be a free address, not any node's own IP
+api_vip_port          = 6443
+apiserver_bind_port   = 6444             # must differ from api_vip_port when proxy_nodes=[] -- see the two-port rule
+
+pod_subnet     = "10.244.0.0/16"
+service_subnet = "10.96.0.0/12"
+dns_domain     = "cluster.local"
+
+kube_proxy_mode        = "iptables"
+calico_encapsulation   = "ipip"          # switch to "vxlan" if your fabric blocks IP protocol 4
+
+remote_stage_dir = "/opt/k8s-airgap"
+skip_upload       = false
+
+enable_ingress_nginx    = true
+ingress_http_nodeport    = 30408
+ingress_https_nodeport   = 32521
+enable_local_storage     = true
+
+# --- Optional egress proxy: off by default. Uncomment only if this
+# site's proxy VIP is reachable and you WANT node bootstrap to use it
+# for anything (it never needs to). ---
+# http_proxy_url  = "http://proxy.example.internal:3128"
+# https_proxy_url = "http://proxy.example.internal:3128"
+# no_proxy_extra  = ["internal-mirror.example.internal"]
+
+# --- Example alternate topology: dedicated proxy nodes + external LB ---
+# manage_vip  = false
+# proxy_nodes = []
+# api_vip     = "10.20.30.10"   # owned by the network team's LB, health-checking apiserver_bind_port on each master

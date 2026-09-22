@@ -1,0 +1,45 @@
+############################################################
+# .gitignore
+#
+# Two categories of things must never land in git history:
+#   1. The bundle payload — it is multi-GB of container image
+#      tarballs and RPMs. It belongs on an artifact store or a
+#      USB drive carried across the air gap, never in a git repo.
+#   2. Cluster credentials — a kubeconfig is a cluster-admin
+#      bearer credential. terraform.tfvars holds real node IPs
+#      and (potentially) an SSH key path; state files can hold
+#      rendered kubeadm configs with the bootstrap token and
+#      certificate-key in plaintext.
+############################################################
+
+# --- bundle payload (requirement #14) ---
+bundle/images/
+bundle/rpms/
+bundle/manifests/
+bundle/bin/
+bundle/.bundle-version
+.artifacts/
+
+# --- Terraform state & credentials ---
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+*.auto.tfvars
+kubeconfig-*
+*.kubeconfig
+crash.log
+crash.*.log
+
+# --- SSH material, just in case one gets dropped here ---
+*.pem
+id_rsa
+id_ed25519
+
+# --- editor / OS noise ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
